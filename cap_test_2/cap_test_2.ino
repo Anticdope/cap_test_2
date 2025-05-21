@@ -1,8 +1,7 @@
-// Improved Touch sensing for Teensy 4.0 using analog input with DMX control
-// Optimized for reliability and responsiveness
+// Simplified Touch sensing for Teensy 4.0 using analog input with DMX control
+// Focused on reliable touch detection with minimal complexity
 
 #include <TeensyDMX.h>
-#include <RunningMedian.h>  // Include for better noise filtering
 
 // Use the TeensyDMX "Sender" on Serial1 (DMX TX on pin 1)
 namespace teensydmx = ::qindesign::teensydmx;
@@ -16,18 +15,17 @@ const uint8_t CH_LAST_FIX      = 1;    // One single-channel fixture at the end
 const uint16_t TOTAL_DMX_CH    = NUM_RGB_FIX * CH_PER_RGB + CH_LAST_FIX;
 
 #define TOUCH_PIN A7           // Analog input for touch sensing
-#define SAMPLE_SIZE 9          // Samples for median filter (odd number is better)
 #define DEBOUNCE_TIME 50       // Milliseconds to debounce touch events
-#define BASELINE_UPDATE_RATE 10000  // How often to update baseline (10 seconds)
+#define SAMPLE_COUNT 5         // Number of samples to average for each reading
 
 // Variables
-RunningMedian touchSamples = RunningMedian(SAMPLE_SIZE);
 int baseline = 0;              // Baseline reading
-int touchThreshold = 60;       // Initial detection threshold
-int releaseThreshold = 40;     // Lower threshold for release detection (hysteresis)
+int touchThreshold = 100;      // Detection threshold - increased for reliability
 bool touched = false;          // Current touch state
 unsigned long lastTouchTime = 0;       // For debouncing
-unsigned long lastBaselineUpdate = 0;  // For adaptive baseline
+
+// Debug mode - set to true for detailed serial output
+const bool DEBUG_MODE = true;
 
 void setup() {
   pinMode(ledPin, OUTPUT);
@@ -38,7 +36,7 @@ void setup() {
   dmxTx.begin();
   allOff();
 
-  Serial.println("Teensy 4.0 Touch Detection - Optimized");
+  Serial.println("Teensy 4.0 Touch Detection - Simplified");
   Serial.println("-------------------------------------");
   
   // Initial calibration
@@ -47,26 +45,32 @@ void setup() {
   Serial.println("System ready!");
 }
 
+// Get a reliable reading by averaging multiple samples
+int getReading() {
+  long sum = 0;
+  for (int i = 0; i < SAMPLE_COUNT; i++) {
+    sum += analogRead(TOUCH_PIN);
+    delay(1);
+  }
+  return sum / SAMPLE_COUNT;
+}
+
 void calibrateBaseline() {
   Serial.println("Calibrating - don't touch the sensor for 3 seconds");
   
-  // Clear any old samples
-  touchSamples.clear();
-  
   // Take many samples for accurate baseline
-  const int numCalibrationSamples = 100;
+  const int numCalibrationSamples = 50;
   long total = 0;
   
   // First discard some readings to let the ADC settle
-  for (int i = 0; i < 10; i++) {
+  for (int i = 0; i < 5; i++) {
     analogRead(TOUCH_PIN);
     delay(5);
   }
   
   // Now collect actual calibration samples
   for (int i = 0; i < numCalibrationSamples; i++) {
-    int sample = analogRead(TOUCH_PIN);
-    total += sample;
+    total += analogRead(TOUCH_PIN);
     
     // Blink LED to show calibration in progress
     if (i % 10 == 0) {
@@ -76,34 +80,21 @@ void calibrateBaseline() {
     delay(30);
   }
   
-  // Set baseline and thresholds based on calibration
+  // Set baseline
   baseline = total / numCalibrationSamples;
-  
-  // Calculate threshold based on noise level in calibration
-  long sumDifferences = 0;
-  for (int i = 0; i < 20; i++) {
-    int sample = analogRead(TOUCH_PIN);
-    sumDifferences += abs(sample - baseline);
-    delay(10);
-  }
-  
-  int noiseLevel = sumDifferences / 20;
-  touchThreshold = max(noiseLevel * 3, 50);  // At least 3x noise or 50, whichever is higher
-  releaseThreshold = touchThreshold * 2/3;   // Release at 2/3 of touch threshold
   
   digitalWriteFast(ledPin, HIGH);  // Ensure LED is in correct state
   
   Serial.println("Calibration complete!");
   Serial.println("Baseline: " + String(baseline));
   Serial.println("Touch threshold: " + String(touchThreshold));
-  Serial.println("Release threshold: " + String(releaseThreshold));
   
-  // Initialize median filter with baseline values
-  for (int i = 0; i < SAMPLE_SIZE; i++) {
-    touchSamples.add(baseline);
+  // Initial debug reading
+  if (DEBUG_MODE) {
+    int currentValue = getReading();
+    Serial.println("Current reading: " + String(currentValue) + 
+                  ", Difference: " + String(currentValue - baseline));
   }
-  
-  lastBaselineUpdate = millis();
 }
 
 // Set RGB values for a fixture
@@ -118,25 +109,6 @@ void setRGB(uint8_t fixtureIndex, uint8_t val) {
 void allOff() {
   for (uint16_t ch = 1; ch <= TOTAL_DMX_CH; ch++) {
     dmxTx.set(ch, 0);
-  }
-}
-
-void updateAdaptiveBaseline() {
-  // Only update if not touched and enough time has passed
-  if (!touched && (millis() - lastBaselineUpdate > BASELINE_UPDATE_RATE)) {
-    // Collect some samples when not touched
-    long total = 0;
-    for (int i = 0; i < 10; i++) {
-      total += analogRead(TOUCH_PIN);
-      delay(5);
-    }
-    
-    // Slowly adjust baseline (10% new, 90% old)
-    int newReading = total / 10;
-    baseline = (baseline * 9 + newReading) / 10;
-    lastBaselineUpdate = millis();
-    
-    Serial.println("Updated baseline: " + String(baseline));
   }
 }
 
@@ -162,23 +134,24 @@ void playLightSequence() {
 }
 
 void loop() {
-  // Add new reading to median filter
-  touchSamples.add(analogRead(TOUCH_PIN));
+  // Get current reading (averaged)
+  int currentValue = getReading();
+  int difference = currentValue - baseline;
   
-  // Get filtered reading
-  int filteredValue = touchSamples.getMedian();
-  int difference = filteredValue - baseline;
+  // Debug output periodically
+  if (DEBUG_MODE && millis() % 1000 < 10) {
+    Serial.println("Reading: " + String(currentValue) + 
+                  ", Baseline: " + String(baseline) + 
+                  ", Diff: " + String(difference));
+  }
   
-  // Update baseline over time to adapt to environment
-  updateAdaptiveBaseline();
-  
-  // Touch detection with hysteresis and debouncing
+  // Touch detection with simple debouncing
   unsigned long currentTime = millis();
   
   if (!touched && difference > touchThreshold && 
       currentTime - lastTouchTime > DEBOUNCE_TIME) {
     // Touch detected
-    Serial.println("TOUCHED! Value: " + String(filteredValue) + 
+    Serial.println("TOUCHED! Value: " + String(currentValue) + 
                   ", Baseline: " + String(baseline) + 
                   ", Diff: " + String(difference));
     
@@ -191,9 +164,9 @@ void loop() {
     
     digitalWriteFast(ledPin, HIGH);
   }
-  else if (touched && difference < releaseThreshold && 
+  else if (touched && difference < (touchThreshold/2) && 
            currentTime - lastTouchTime > DEBOUNCE_TIME) {
-    // Touch released
+    // Touch released (using hysteresis - release at half the touch threshold)
     Serial.println("Released");
     touched = false;
     lastTouchTime = currentTime;
@@ -201,5 +174,5 @@ void loop() {
   }
   
   // Small delay for stability
-  delay(10);  // Much more responsive than 50ms
+  delay(10);
 }
